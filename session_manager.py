@@ -5,6 +5,7 @@ import re
 import shutil
 import tempfile
 import time
+import json
 from pathlib import Path
 
 from config import SESSIONS_DIR
@@ -14,7 +15,10 @@ def safe_session_name(value: str) -> str:
     value = value.strip()
     value = re.sub(r'[<>:"/\\|?*\x00-\x1F]', "_", value)
     value = re.sub(r"\s+", "_", value).strip(" ._")
-    return value or "whatsapp_account"
+    value = value or "whatsapp_account"
+    if value.upper().split('.')[0] in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}:
+        value = "account_" + value
+    return value
 
 
 def session_dir(account_name: str) -> Path:
@@ -52,7 +56,8 @@ def _copy_dir(src: Path, dst: Path) -> None:
     if not src.exists() or not src.is_dir():
         return
     dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(src, dst, dirs_exist_ok=True)
+    shutil.copytree(src, dst, dirs_exist_ok=True, ignore=shutil.ignore_patterns(
+        "Cache", "CacheStorage", "Code Cache", "GPUCache", "Media Cache", "ScriptCache"))
 
 
 def restore_session_snapshot(account_name: str, temp_root: Path) -> None:
@@ -100,7 +105,7 @@ def restore_session_snapshot(account_name: str, temp_root: Path) -> None:
         )
 
 
-def save_session_snapshot(account_name: str, temp_root: Path) -> Path:
+def save_session_snapshot(account_name: str, temp_root: Path, accounts: dict | None = None) -> Path:
     """
     Save only lightweight session data after Chrome has been closed.
 
@@ -111,8 +116,10 @@ def save_session_snapshot(account_name: str, temp_root: Path) -> Path:
     staging = target.with_name(target.name + ".__new__")
 
     if staging.exists():
-        shutil.rmtree(staging, ignore_errors=True)
+        _remove_session_tree(staging)
     staging.mkdir(parents=True, exist_ok=True)
+    if accounts is not None:
+        (staging / 'accounts.json').write_text(json.dumps(accounts), encoding='utf-8')
 
     # Root metadata.
     _copy_file(temp_root / "Local State", staging / "Local State")
@@ -149,7 +156,7 @@ def save_session_snapshot(account_name: str, temp_root: Path) -> Path:
     # Replace previous snapshot.
     old = target.with_name(target.name + ".__old__")
     if old.exists():
-        shutil.rmtree(old, ignore_errors=True)
+        _remove_session_tree(old)
 
     # target currently exists because session_dir() creates it.
     # Move the old one aside first.
@@ -157,10 +164,15 @@ def save_session_snapshot(account_name: str, temp_root: Path) -> Path:
         try:
             target.rename(old)
         except OSError:
-            shutil.rmtree(target, ignore_errors=True)
+            raise RuntimeError("Could not preserve previous session; snapshot not replaced")
 
-    staging.rename(target)
-    shutil.rmtree(old, ignore_errors=True)
+    try:
+        staging.rename(target)
+    except OSError:
+        if old.exists() and not target.exists():
+            old.rename(target)
+        raise
+    _remove_session_tree(old)
 
     return target
 
@@ -168,6 +180,11 @@ def save_session_snapshot(account_name: str, temp_root: Path) -> Path:
 def cleanup_temp_profile(temp_root: Path | None) -> None:
     if temp_root is None:
         return
+
+    temp_root = Path(temp_root).resolve()
+    expected_root = Path(tempfile.gettempdir()).resolve()
+    if temp_root.parent != expected_root or not temp_root.name.startswith("wa_"):
+        raise ValueError("Refusing cleanup outside the disposable profile directory")
 
     # Chrome may need a tiny moment to release SQLite/LevelDB file handles.
     for attempt in range(6):
@@ -181,7 +198,12 @@ def cleanup_temp_profile(temp_root: Path | None) -> None:
 
 
 def delete_session_snapshot(account_name: str) -> None:
-    shutil.rmtree(
-        SESSIONS_DIR / safe_session_name(account_name),
-        ignore_errors=True,
-    )
+    _remove_session_tree(SESSIONS_DIR / safe_session_name(account_name))
+
+
+def _remove_session_tree(path: Path) -> None:
+    resolved = path.resolve()
+    root = SESSIONS_DIR.resolve()
+    if resolved.parent != root:
+        raise ValueError("Refusing removal outside sessions directory")
+    shutil.rmtree(resolved, ignore_errors=True)

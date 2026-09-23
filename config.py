@@ -57,3 +57,9 @@ def ensure_directories() -> None:
 
     if not PRESENCE_HISTORY_FILE.exists():
         PRESENCE_HISTORY_FILE.write_text("[]", encoding="utf-8")
+
+INSTAGRAM_URL = "https://www.instagram.com/direct/inbox/"
+PRESENCE_CONFIRMATIONS = max(2, int(os.getenv("PRESENCE_CONFIRMATIONS", "2")))
+PRESENCE_CHECK_DELAY = max(0.1, float(os.getenv("PRESENCE_CHECK_DELAY", "0.3")))
+CHECK_INTERVAL = max(1.0, CHECK_INTERVAL)
+TELEGRAM_CONTROL = os.getenv("TELEGRAM_CONTROL", "true").lower() == "true"

@@ -6,6 +6,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 from uuid import uuid4
+import re
 
 from config import EVENTS_FILE, ERRORS_FILE, PRESENCE_HISTORY_FILE
 
@@ -25,6 +26,7 @@ def _read_json_array(path: Path) -> list[dict]:
 
 def _append(path: Path, item: dict[str, Any]) -> None:
     with _lock:
+        path.parent.mkdir(parents=True, exist_ok=True)
         rows = _read_json_array(path)
         rows.append(item)
 
@@ -45,16 +47,21 @@ def log_event(
     message_id: str | None,
     message_preview: str,
     screenshot: str | None,
+    platform: str = "whatsapp",
+    **extra,
 ) -> dict:
     item = {
         "id": str(uuid4()),
         "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "platform": platform,
+        **extra,
         "account": account,
         "contact": contact,
         "event": event,
         "status": status,
         "message_id": message_id,
         "message_preview": message_preview,
+        "message": message_preview,
         "screenshot": screenshot,
     }
     _append(EVENTS_FILE, item)
@@ -69,10 +76,14 @@ def log_presence_change(
     current_status: str,
     event: str,
     screenshot: str | None,
+    platform: str = "whatsapp",
+    **extra,
 ) -> dict:
     item = {
         "id": str(uuid4()),
         "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "platform": platform,
+        **extra,
         "account": account,
         "contact": contact,
         "previous_status": previous_status,
@@ -115,7 +126,7 @@ def log_error(context: str, error: Exception | str) -> dict:
         "id": str(uuid4()),
         "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
         "context": context,
-        "error": str(error),
+        "error": re.sub(r"bot[0-9]+:[A-Za-z0-9_-]+", "bot[REDACTED]", str(error)),
     }
     _append(ERRORS_FILE, item)
     return item

@@ -3,12 +3,13 @@ from __future__ import annotations
 import pickle
 import re
 import time
+import json
 from pathlib import Path
 from typing import Iterable
 
 from selenium.common.exceptions import WebDriverException
 
-from config import ACCOUNTS_DIR, WHATSAPP_URL
+from config import ACCOUNTS_DIR, WHATSAPP_URL, INSTAGRAM_URL, SESSIONS_DIR
 from session_manager import delete_session_snapshot
 
 
@@ -31,20 +32,20 @@ def safe_account_name(value: str) -> str:
     return value or "whatsapp_account"
 
 
-def list_accounts() -> list[Path]:
+def list_accounts(platform: str = "whatsapp") -> list[Path]:
     ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
-    return sorted(ACCOUNTS_DIR.glob("*.pkl"), key=lambda p: p.name.lower())
+    return sorted(account_directory(platform).glob("*.pkl"), key=lambda p: p.name.lower())
 
 
 def account_label(path: Path) -> str:
     return path.stem
 
 
-def save_cookies(driver, account_name: str, overwrite: bool = True) -> Path:
+def save_cookies(driver, account_name: str, overwrite: bool = True, platform: str = "whatsapp") -> Path:
     ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
 
     clean_name = safe_account_name(account_name)
-    path = ACCOUNTS_DIR / f"{clean_name}.pkl"
+    path = account_directory(platform) / f"{clean_name}.pkl"
 
     if path.exists() and not overwrite:
         raise FileExistsError(f"Account already exists: {path.name}")
@@ -55,7 +56,8 @@ def save_cookies(driver, account_name: str, overwrite: bool = True) -> Path:
         "version": 1,
         "account_name": clean_name,
         "saved_at": time.time(),
-        "url": WHATSAPP_URL,
+        "url": WHATSAPP_URL if platform == "whatsapp" else INSTAGRAM_URL,
+        "platform": platform,
         "cookies": cookies,
     }
 
@@ -101,12 +103,12 @@ def read_cookie_file(path: Path) -> tuple[str, list[dict]]:
     return account_name, cookies
 
 
-def load_cookies(driver, path: Path) -> tuple[str, int, int]:
+def load_cookies(driver, path: Path, platform: str = "whatsapp") -> tuple[str, int, int]:
     account_name, cookies = read_cookie_file(path)
 
     # Selenium only allows adding cookies for the current domain.
-    if "web.whatsapp.com" not in driver.current_url:
-        driver.get(WHATSAPP_URL)
+    url = WHATSAPP_URL if platform == "whatsapp" else INSTAGRAM_URL
+    driver.get(url)
 
     loaded = 0
     failed = 0
@@ -124,6 +126,26 @@ def load_cookies(driver, path: Path) -> tuple[str, int, int]:
 
 
 def delete_account(path: Path) -> None:
+    path = path.resolve()
+    if path.parent not in {ACCOUNTS_DIR.resolve(), (ACCOUNTS_DIR / 'instagram').resolve()} or path.suffix != '.pkl':
+        raise ValueError('Invalid account path')
+    platform = 'instagram' if path.parent.name == 'instagram' else 'whatsapp'
     account_name = path.stem
     path.unlink(missing_ok=True)
-    delete_session_snapshot(account_name)
+    if platform == 'whatsapp':
+        delete_session_snapshot(account_name)
+    for metadata in SESSIONS_DIR.glob('social_*/accounts.json'):
+        try:
+            accounts = json.loads(metadata.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        if accounts.get(platform) == account_name:
+            delete_session_snapshot(metadata.parent.name)
+
+
+def account_directory(platform: str) -> Path:
+    if platform not in {"whatsapp", "instagram"}:
+        raise ValueError("Unknown platform")
+    path = ACCOUNTS_DIR if platform == "whatsapp" else ACCOUNTS_DIR / platform
+    path.mkdir(parents=True, exist_ok=True)
+    return path

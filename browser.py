@@ -11,7 +11,7 @@ def create_driver(account_name: str):
     """
     Lightweight Chrome:
       - disposable temp user-data-dir for this run
-      - restores only a small WhatsApp session snapshot
+      - restores a lightweight session snapshot (legacy account or social pair)
       - no permanent browser cache/history profile
     """
     temp_profile = create_temp_profile(account_name)
@@ -50,6 +50,6 @@ def create_driver(account_name: str):
 
     driver.set_page_load_timeout(35)
 
-    # Attach path so main.py can snapshot it AFTER driver.quit().
+    # The single Selenium worker snapshots this AFTER driver.quit().
     driver._wa_temp_profile = temp_profile
     return driver

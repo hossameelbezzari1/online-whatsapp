@@ -166,7 +166,7 @@ def _looks_like_presence(value: str | None) -> bool:
 
 def get_current_chat_presence(
     driver: Chrome,
-    attempts: int = 10,
+    attempts: int = 2,
     delay: float = 0.35,
 ) -> str | None:
     """
@@ -233,7 +233,7 @@ def get_current_chat_name(driver: Chrome) -> str | None:
     """
     try:
         value = driver.execute_script(
-            """
+            r"""
             const header = document.querySelector("#main header");
             if (!header) return null;
 
@@ -246,12 +246,13 @@ def get_current_chat_name(driver: Chrome) -> str | None:
             for (const selector of selectors) {
               const nodes = Array.from(header.querySelectorAll(selector));
               for (const node of nodes) {
+                if (!node.getClientRects().length) continue;
                 if (node.closest("[data-testid='chat-subtitle']")) continue;
                 const value = (node.getAttribute("title")
                   || node.innerText
                   || node.textContent
                   || "").trim();
-                if (value) return value;
+                if (value && !/^(online|not visible|last seen\b|typing)/i.test(value)) return value;
               }
             }
 
@@ -418,8 +419,8 @@ def _status_from_message(message_element) -> str:
                         "seen",
                         "lu",
                         "lue",
-                        "قرئت",
-                        "مقروء",
+                        "Ù‚Ø±Ø¦Øª",
+                        "Ù…Ù‚Ø±ÙˆØ¡",
                     )
                 ):
                     return "read"
@@ -633,12 +634,10 @@ def _notify_transition(
     screenshot_path: Path | None = None
 
     try:
-        screenshot_path = take_screenshot(
-            driver,
-            account=account,
-            contact=contact,
-            event=event,
-        )
+        if event in {"delivered", "read", "seen"}:
+            screenshot_path = take_screenshot(
+                driver, account=account, contact=contact, event=event,
+            )
     except Exception as exc:
         log_error("take_screenshot", exc)
 
@@ -769,355 +768,23 @@ def _notify_presence_change(
         log_error("presence_change_notify", exc)
 
 
-def watch_chat_combined(
-    driver: Chrome,
-    *,
-    account: str,
-    contact: str,
-) -> None:
+def watch_chat_combined(driver, *, account: str, contact: str) -> None:
+    """Compatibility entry point: one message tick, never a competing driver loop.
+
+    Continuous scheduling is owned by PlatformManager.
     """
-    Combined mode:
-      - Automatically watches the latest outgoing message for Delivered/Read.
-      - ONLINE/last-seen is checked ONLY when the user presses R.
-      - Q returns to the account menu.
+    from platform_manager import MessageTracker
+    tracker = getattr(driver, "_social_message_tracker", None)
+    if tracker is None:
+        tracker = driver._social_message_tracker = MessageTracker()
+    current_contact = get_current_chat_name(driver)
+    if current_contact:
+        tracker.observe("whatsapp", account, current_contact,
+                        get_last_outgoing_message(driver),
+                        lambda snapshot: _notify_transition(
+                            driver, account=account, contact=current_contact,
+                            snapshot=snapshot, event=snapshot.status))
 
-    On Windows, msvcrt is used so keyboard input does not block message-status
-    monitoring.
-    """
-    print()
-    print("=" * 64)
-    print(f"[WATCHING] Account : {account}")
-    print(f"[WATCHING] Contact : {contact}")
-    print("[AUTO] Delivered / Read monitoring is active.")
-    print("[AUTO] Chat subtitle changes are sent to Telegram.")
-    print("[MANUAL] Press R = refresh ONLINE / last seen")
-    print("[EXIT]   Press Q = return to menu")
-    print("=" * 64)
-    print()
 
-    previous_message: MessageSnapshot | None = None
-    confirmed_presence: PresenceState | None = None
-    pending_presence: PresenceState | None = None
-    pending_presence_count = 0
-    next_message_check = 0.0
-    next_presence_check = 0.0
-
-    # Windows keyboard polling without blocking Selenium checks.
-    if os.name == "nt":
-        import msvcrt
-    else:
-        msvcrt = None
-
-    while True:
-        try:
-            now = time.monotonic()
-
-            # Automatic monitoring of the user's latest outgoing message.
-            if now >= next_message_check:
-                current = get_last_outgoing_message(driver)
-
-                if current is not None:
-                    if previous_message is None:
-                        previous_message = current
-                        print(
-                            f"[MESSAGE BASELINE] status={current.status} "
-                            f"id={current.message_id or 'n/a'}"
-                        )
-
-                    elif (
-                        current.message_id
-                        and previous_message.message_id
-                        and current.message_id != previous_message.message_id
-                    ):
-                        previous_message = current
-                        print(
-                            f"[NEW MESSAGE] tracking latest outgoing message "
-                            f"(status={current.status})"
-                        )
-
-                    else:
-                        old_rank = _event_rank(previous_message.status)
-                        new_rank = _event_rank(current.status)
-
-                        if new_rank > old_rank:
-                            if current.status in {"delivered", "read"}:
-                                print(
-                                    f"[MESSAGE EVENT] "
-                                    f"{previous_message.status} -> {current.status}"
-                                )
-                                _notify_transition(
-                                    driver,
-                                    account=account,
-                                    contact=contact,
-                                    snapshot=current,
-                                    event=current.status,
-                                )
-
-                            previous_message = current
-
-                        elif current.status != previous_message.status:
-                            if current.status != "unknown":
-                                previous_message = current
-
-                next_message_check = now + CHECK_INTERVAL
-
-            # Automatic monitoring of the chat subtitle:
-            # #main [data-testid='chat-subtitle'] span[data-testid='selectable-text']
-            if now >= next_presence_check:
-                try:
-                    contact_name = get_current_chat_name(driver) or contact
-                    presence = get_current_chat_presence(
-                        driver,
-                        attempts=1,
-                        delay=0,
-                    )
-                except Exception as exc:
-                    log_error("combined_presence_auto_check", exc)
-                    contact_name = contact
-                    presence = None
-
-                contact = contact_name
-                current_presence = _normalize_presence(presence)
-
-                if current_presence.key != "unknown":
-                    same_pending = (
-                        pending_presence is not None
-                        and pending_presence.key == current_presence.key
-                    )
-
-                    if same_pending:
-                        pending_presence = current_presence
-                        pending_presence_count += 1
-                    else:
-                        pending_presence = current_presence
-                        pending_presence_count = 1
-
-                    if pending_presence_count >= 2:
-                        stable_presence = pending_presence
-
-                        if confirmed_presence is None:
-                            confirmed_presence = stable_presence
-                            print(f"[STATUS BASELINE] {stable_presence.label}")
-
-                        elif stable_presence.key == confirmed_presence.key:
-                            confirmed_presence = stable_presence
-
-                        elif (
-                            confirmed_presence.key == "online"
-                            and stable_presence.key == "offline"
-                        ):
-                            previous_status = confirmed_presence.label
-                            confirmed_presence = stable_presence
-                            print(
-                                f"[STATUS EVENT] {previous_status} -> "
-                                f"{stable_presence.label}"
-                            )
-                            _notify_presence_change(
-                                driver,
-                                account=account,
-                                contact=contact_name,
-                                previous_status=previous_status,
-                                current_status=stable_presence.label,
-                                event="offline",
-                            )
-
-                        elif (
-                            confirmed_presence.key == "online"
-                            and stable_presence.key == "not_visible"
-                        ):
-                            previous_status = confirmed_presence.label
-                            confirmed_presence = stable_presence
-                            print(
-                                f"[STATUS EVENT] {previous_status} -> "
-                                f"{stable_presence.label}"
-                            )
-                            _notify_presence_change(
-                                driver,
-                                account=account,
-                                contact=contact_name,
-                                previous_status=previous_status,
-                                current_status=stable_presence.label,
-                                event="unavailable",
-                            )
-
-                        elif (
-                            confirmed_presence.key != "online"
-                            and stable_presence.key == "online"
-                        ):
-                            previous_status = confirmed_presence.label
-                            confirmed_presence = stable_presence
-                            print(
-                                f"[STATUS EVENT] {previous_status} -> "
-                                f"{stable_presence.label}"
-                            )
-                            _notify_presence_change(
-                                driver,
-                                account=account,
-                                contact=contact_name,
-                                previous_status=previous_status,
-                                current_status=stable_presence.label,
-                                event="online",
-                            )
-
-                        elif stable_presence.key != "not_visible":
-                            confirmed_presence = stable_presence
-
-                next_presence_check = now + PRESENCE_CHECK_INTERVAL
-
-            # Manual presence/status refresh.
-            key = None
-
-            if msvcrt is not None and msvcrt.kbhit():
-                key = msvcrt.getwch().lower()
-
-            if key == "q":
-                print("\n[STOPPED] Retour au menu.")
-                return
-
-            if key == "r":
-                try:
-                    contact_name = get_current_chat_name(driver) or contact
-                    presence = get_current_chat_presence(driver)
-                except Exception as exc:
-                    log_error("combined_presence_refresh", exc)
-                    presence = None
-                    contact_name = contact
-
-                contact = contact_name
-                current_presence = _normalize_presence(presence)
-
-                print()
-                print("-" * 64)
-                print(f"[STATUS] Chat   : {contact_name}")
-                print(f"[STATUS] Actuel : {current_presence.label}")
-                print("-" * 64)
-
-                if current_presence.key == "online":
-                    print("[STATUS] ONLINE detecte. Confirmation automatique active.")
-                elif current_presence.key == "not_visible":
-                    print("[STATUS] Not visible - ignore sauf confirmation apres ONLINE.")
-                else:
-                    print("[STATUS] Pas ONLINE pour le moment.")
-
-                print()
-                print("[MANUAL] R = refresh status | Q = retour")
-
-            # Non-Windows fallback: keep behavior safe and explicit.
-            if msvcrt is None:
-                time.sleep(min(PRESENCE_CHECK_INTERVAL, 0.25))
-            else:
-                time.sleep(min(PRESENCE_CHECK_INTERVAL, 0.10))
-
-        except KeyboardInterrupt:
-            print("\n[STOPPED] Retour au menu.")
-            return
-        except StaleElementReferenceException:
-            time.sleep(0.25)
-        except WebDriverException as exc:
-            log_error("combined_watcher_webdriver", exc)
-            print(f"\n[WebDriver error] {exc}")
-            return
-        except Exception as exc:
-            log_error("combined_watcher_loop", exc)
-            print(f"\n[Watcher error] {exc}")
-            time.sleep(0.5)
-
-def watch_last_outgoing_message(
-    driver: Chrome,
-    *,
-    account: str,
-    contact: str,
-) -> None:
-    print()
-    print(f"[WATCHING] Account: {account}")
-    print(f"[WATCHING] Contact: {contact}")
-
-    try:
-        presence = get_current_chat_presence(driver)
-    except Exception:
-        presence = None
-
-    if presence:
-        print(f"[CURRENT STATUS] {presence}")
-    else:
-        print("[CURRENT STATUS] Not visible")
-
-    print("[WATCHING] Press CTRL+C to stop and return to menu.")
-    print()
-
-    previous: MessageSnapshot | None = None
-
-    while True:
-        try:
-            if not is_logged_in(driver):
-                print("[!] WhatsApp session is no longer logged in.")
-                return
-
-            current = get_last_outgoing_message(driver)
-
-            if current is None:
-                print("\r[WAIT] No outgoing message found in this chat...", end="")
-                time.sleep(CHECK_INTERVAL)
-                continue
-
-            if previous is None:
-                previous = current
-                print(
-                    f"[BASELINE] status={current.status} "
-                    f"id={current.message_id or 'n/a'}"
-                )
-                time.sleep(CHECK_INTERVAL)
-                continue
-
-            # User sent a new outgoing message while the watcher was running.
-            if (
-                current.message_id
-                and previous.message_id
-                and current.message_id != previous.message_id
-            ):
-                previous = current
-                print(
-                    f"[NEW MESSAGE] tracking latest outgoing message "
-                    f"(status={current.status})"
-                )
-                time.sleep(CHECK_INTERVAL)
-                continue
-
-            old_rank = _event_rank(previous.status)
-            new_rank = _event_rank(current.status)
-
-            if new_rank > old_rank:
-                # Notify only for useful delivery/read transitions.
-                if current.status in {"delivered", "read"}:
-                    print(f"[EVENT] {previous.status} -> {current.status}")
-                    _notify_transition(
-                        driver,
-                        account=account,
-                        contact=contact,
-                        snapshot=current,
-                        event=current.status,
-                    )
-
-                previous = current
-
-            elif current.status != previous.status:
-                # DOM glitches can briefly report "unknown"; keep the last
-                # reliable state instead of generating duplicate events.
-                if current.status != "unknown":
-                    previous = current
-
-            time.sleep(CHECK_INTERVAL)
-
-        except KeyboardInterrupt:
-            print("\n[STOPPED] Watcher stopped.")
-            return
-        except StaleElementReferenceException:
-            time.sleep(0.5)
-        except WebDriverException as exc:
-            log_error("watcher_webdriver", exc)
-            print(f"\n[WebDriver error] {exc}")
-            return
-        except Exception as exc:
-            log_error("watcher_loop", exc)
-            print(f"\n[Watcher error] {exc}")
-            time.sleep(max(CHECK_INTERVAL, 1))
+def watch_last_outgoing_message(driver, *, account: str, contact: str) -> None:
+    watch_chat_combined(driver, account=account, contact=contact)

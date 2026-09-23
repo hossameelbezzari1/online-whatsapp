@@ -36,7 +36,7 @@ def send_telegram_text(text: str) -> tuple[bool, str]:
         response.raise_for_status()
         return True, "Telegram message sent"
     except Exception as exc:
-        return False, str(exc)
+        return False, type(exc).__name__
 
 
 def send_telegram_photo(photo_path: Path, caption: str) -> tuple[bool, str]:
@@ -62,7 +62,7 @@ def send_telegram_photo(photo_path: Path, caption: str) -> tuple[bool, str]:
         response.raise_for_status()
         return True, "Telegram photo sent"
     except Exception as exc:
-        return False, str(exc)
+        return False, type(exc).__name__
 
 
 def send_windows_notification(title: str, message: str) -> tuple[bool, str]:
@@ -84,7 +84,7 @@ def send_windows_notification(title: str, message: str) -> tuple[bool, str]:
         toast.show()
         return True, "Windows notification sent"
     except Exception as exc:
-        return False, str(exc)
+        return False, type(exc).__name__
 
 
 def notify_event(
@@ -96,6 +96,8 @@ def notify_event(
     message_preview: str,
     timestamp: str,
     screenshot_path: Path | None,
+    platform: str = "whatsapp",
+    previous_status: str | None = None,
 ) -> dict:
     pretty_event = {
         "sent": "Sent",
@@ -112,15 +114,14 @@ def notify_event(
     if len(preview) > 240:
         preview = preview[:237] + "..."
 
-    text = (
-        f"WhatsApp event\n"
-        f"Account: {account}\n"
-        f"Contact: {contact}\n"
-        f"Event: {pretty_event}\n"
-        f"Status: {status}\n"
-        f"Time: {timestamp}\n"
-        f"Message: {preview}"
-    )
+    brand = "WhatsApp" if platform == "whatsapp" else "Instagram"
+    icon = {"online": "🟢", "offline": "⚪", "unavailable": "⚪",
+            "delivered": "✅", "read": "🔵", "seen": "📸"}.get(event, "💬")
+    text = f"{icon} {brand} {event.upper()}\n\n👤 {contact}\n📱 {account}\n🕒 {timestamp}"
+    if previous_status is not None:
+        text += f"\n\nPrevious: {previous_status}\nCurrent: {status}"
+    else:
+        text += f"\n💬 {preview}"
 
     results = {}
 
@@ -136,7 +137,7 @@ def notify_event(
     results["telegram"] = {"ok": ok, "info": info}
 
     ok, info = send_windows_notification(
-        title=f"WhatsApp - {contact}",
+        title=f"{brand} - {contact}",
         message=f"{pretty_event}: {preview}",
     )
     results["windows"] = {"ok": ok, "info": info}
